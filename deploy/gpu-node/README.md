@@ -35,9 +35,8 @@ deploy/gpu-node/
 На инстансе (root):
 
 ```bash
-# 1. Копия репозитория (с локальной машины):
-rsync -az --exclude .venv --exclude __pycache__ --exclude .git --exclude .env \
-  -e "ssh -p <PORT>" ./ root@<HOST>:/workspace/caller/
+# 1. Копия репозитория:
+git clone https://github.com/GregRublik/caller.git /workspace/caller
 
 # 2. .env (на инстансе):
 cp /workspace/caller/deploy/gpu-node/env.gpu.example /workspace/caller/.env
@@ -49,6 +48,25 @@ chmod 600 /workspace/caller/.env
 ```
 
 `install.sh` идемпотентен: повторный запуск доустанавливает недостающее.
+Модели качаются через `hf_transfer` (в несколько раз быстрее; при сбое —
+автоматический повтор без него).
+
+## Быстрый запуск после stop/start
+
+На vast.ai `Stop` сохраняет диск, `Destroy`/`Recycle` — стирают его. После
+`Start` (когда `install.sh` уже отработал) поднять стек — одна команда:
+
+```bash
+bash /workspace/caller/deploy/gpu-node/start.sh
+```
+
+Скрипт поднимает `supervisord`, если он не запущен, стартует vLLM/STT/TTS и
+ждёт их health-эндпоинты (до `WAIT` секунд, по умолчанию 600). Агент
+добавляется флагом `--agent` (нужен живой LiveKit по `LIVEKIT_URL`).
+
+Ориентиры по времени первого запуска: apt-пакеты —1–2 мин, два venv —5–10 мин,
+модели —10–25 мин (зависит от канала), загрузка vLLM в VRAM —1–2 мин.
+Повторный запуск после resume —3–5 мин.
 
 ## Управление
 
@@ -94,5 +112,7 @@ supervisorctl start caller-agent
 
 ## Обновление кода
 
-Повторить `rsync` (без `.env`) и `supervisorctl restart caller-stt caller-tts caller-agent`
-по необходимости.
+```bash
+cd /workspace/caller && git pull
+supervisorctl restart caller-stt caller-tts caller-agent   # что менялось
+```

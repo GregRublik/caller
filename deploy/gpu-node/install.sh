@@ -40,6 +40,8 @@ uv pip install --python "$APP_PY" \
   'httpx>=0.27,<1' 'python-dotenv>=1.0,<2'
 # --no-deps: qwen-tts pulls gradio for its demo UI, which the service does not use.
 uv pip install --python "$APP_PY" --no-deps qwen-tts==0.1.1
+# Rust downloader for huggingface_hub: several times faster on multi-GB models.
+uv pip install --python "$APP_PY" hf-transfer
 
 echo "== llm venv (vLLM)"
 uv venv --allow-existing --python 3.12 "$VENVS/llm"
@@ -62,9 +64,18 @@ fi
 
 echo "== models"
 HF="$VENVS/app/bin/hf"
-"$HF" download "${LLM_MODEL_ID:-Qwen/Qwen3-14B-FP8}"
-"$HF" download "${STT_MODEL_ID:-ai-sage/GigaAM-v3}" --revision "${STT_MODEL_REVISION:-e2e_rnnt}"
-"$HF" download "${TTS_MODEL_ID:-Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice}"
+export HF_HUB_ENABLE_HF_TRANSFER=${HF_HUB_ENABLE_HF_TRANSFER:-1}
+download_model() {
+  local repo=$1
+  shift
+  if ! "$HF" download "$repo" "$@"; then
+    echo "download of $repo failed; retrying without hf_transfer"
+    HF_HUB_ENABLE_HF_TRANSFER=0 "$HF" download "$repo" "$@"
+  fi
+}
+download_model "${LLM_MODEL_ID:-Qwen/Qwen3-14B-FP8}"
+download_model "${STT_MODEL_ID:-ai-sage/GigaAM-v3}" --revision "${STT_MODEL_REVISION:-e2e_rnnt}"
+download_model "${TTS_MODEL_ID:-Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice}"
 
 echo "== supervisor units"
 install -m 644 "$ROOT"/deploy/gpu-node/supervisor/caller-*.conf /etc/supervisor/conf.d/
