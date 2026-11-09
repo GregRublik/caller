@@ -1,0 +1,8 @@
+{
+  "trunk": {
+    "name": "local-asterisk-outbound",
+    "address": "127.0.0.1:5062",
+    "numbers": ["100"],
+    "transport": "SIP_TRANSPORT_UDP"
+  }
+}

@@ -1,0 +1,5 @@
+# LiveKit signalling endpoint. Caddy obtains a Let's Encrypt certificate
+# automatically once DNS for the domain points at this server.
+{$LIVEKIT_DOMAIN} {
+	reverse_proxy 127.0.0.1:7880
+}

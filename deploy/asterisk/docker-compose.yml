@@ -1,0 +1,10 @@
+name: asterisk
+
+services:
+  asterisk:
+    build: .
+    image: caller/asterisk:local
+    restart: unless-stopped
+    # Host networking lets Asterisk share 127.0.0.1 with the LiveKit
+    # containers and use SIP port 5062 + the RTP range directly.
+    network_mode: host

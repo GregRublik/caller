@@ -1,0 +1,89 @@
+name: livekit
+
+# LiveKit Server + SIP + Redis for the caller project.
+#
+# Both livekit-server and livekit-sip use host networking: RTP/WebRTC need
+# large UDP port ranges, which is both faster and simpler than publishing
+# thousands of ports through Docker's proxy.
+#
+# Caddy terminates TLS for wss://<LIVEKIT_DOMAIN> and proxies to the LiveKit
+# server on 127.0.0.1:7880.
+
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "60", "1", "--appendonly", "no"]
+    ports:
+      # Only for livekit-server / livekit-sip on the host; never expose publicly.
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  livekit:
+    image: livekit/livekit-server:v1.13.11
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      LIVEKIT_CONFIG: |
+        port: 7880
+        log_level: info
+        rtc:
+          tcp_port: 7881
+          port_range_start: 50000
+          port_range_end: 60000
+          use_external_ip: true
+        redis:
+          address: 127.0.0.1:6379
+        keys:
+          "${LIVEKIT_API_KEY}": "${LIVEKIT_API_SECRET}"
+        turn:
+          enabled: false
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  sip:
+    image: livekit/sip:v1.23.0
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      SIP_CONFIG_BODY: |
+        api_key: '${LIVEKIT_API_KEY}'
+        api_secret: '${LIVEKIT_API_SECRET}'
+        ws_url: 'ws://127.0.0.1:7880'
+        redis:
+          address: '127.0.0.1:6379'
+        sip_port: 5060
+        rtp_port: 10000-20000
+        use_external_ip: true
+        logging:
+          level: info
+    depends_on:
+      redis:
+        condition: service_healthy
+      livekit:
+        condition: service_started
+
+  caddy:
+    image: caddy:2.11.9-alpine
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      LIVEKIT_DOMAIN: ${LIVEKIT_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - livekit
+
+volumes:
+  redis-data:
+  caddy-data:
+  caddy-config:

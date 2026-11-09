@@ -1,0 +1,18 @@
+[project]
+name = "caller"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "aiohttp>=3.14.5",
+    "grpcio>=1.78,<1.82",
+    "livekit>=1.2.1",
+    "livekit-agents[cartesia,deepgram,openai]>=1.3.11",
+    "openai>=3.0",
+    "pipecat-ai[openai,piper,silero,local]>=1.0.0",
+    "pydantic-settings>=2.16.1",
+    "python-dotenv>=1.0.0",
+    "sounddevice>=0.5.6",
+    "yandex-ai-studio-sdk>=0.22.1",
+]

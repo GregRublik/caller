@@ -1,0 +1,17 @@
+{
+  "dispatch_rule": {
+    "name": "sales-agent",
+    "rule": {
+      "dispatch_rule_individual": {
+        "room_prefix": "call-"
+      }
+    },
+    "room_config": {
+      "agents": [
+        {
+          "agent_name": "sales-agent"
+        }
+      ]
+    }
+  }
+}

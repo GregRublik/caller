@@ -1,0 +1,83 @@
+name: livekit-local
+
+# Local test stack for macOS (Docker Desktop).
+#
+# Differences from docker-compose.yml (the server deployment):
+#   * no Caddy / TLS: everything talks over ws://127.0.0.1:7880
+#   * small UDP port ranges, so Docker Desktop does not have to proxy 20k ports
+#   * node_ip / nat_1_to_1_ip are pinned to 127.0.0.1, because Docker Desktop
+#     host networking proxies ports at L4 and the container's own interface
+#     address is not reachable from the Mac
+#   * a separate Redis port (6380) to avoid clashing with local services
+#
+# Requires "Enable host networking" in Docker Desktop -> Settings -> Resources
+# -> Network (Docker Desktop 4.34+).
+#
+# Run:  docker compose -f docker-compose.local.yml up -d
+# Keys are the well-known LiveKit dev values; never use them on a server.
+
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "60", "1", "--appendonly", "no"]
+    ports:
+      - "127.0.0.1:6380:6379"
+    volumes:
+      - redis-local-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  livekit:
+    image: livekit/livekit-server:v1.13.11
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      LIVEKIT_CONFIG: |
+        port: 7880
+        log_level: debug
+        rtc:
+          tcp_port: 7881
+          port_range_start: 50000
+          port_range_end: 50050
+          use_external_ip: false
+          node_ip: 127.0.0.1
+          enable_loopback_candidate: true
+        redis:
+          address: 127.0.0.1:6380
+        keys:
+          "devkey": "secret"
+        turn:
+          enabled: false
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  sip:
+    image: livekit/sip:v1.23.0
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      SIP_CONFIG_BODY: |
+        api_key: 'devkey'
+        api_secret: 'secret'
+        ws_url: 'ws://127.0.0.1:7880'
+        redis:
+          address: '127.0.0.1:6380'
+        sip_port: 5060
+        rtp_port: 10000-10050
+        use_external_ip: false
+        nat_1_to_1_ip: '127.0.0.1'
+        logging:
+          level: debug
+    depends_on:
+      redis:
+        condition: service_healthy
+      livekit:
+        condition: service_started
+
+volumes:
+  redis-local-data:

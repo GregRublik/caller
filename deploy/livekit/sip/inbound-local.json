@@ -1,0 +1,6 @@
+{
+  "trunk": {
+    "name": "local-asterisk-inbound",
+    "allowed_addresses": ["127.0.0.1"]
+  }
+}

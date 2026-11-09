@@ -1,0 +1,10 @@
+{
+  "dispatch_rule": {
+    "name": "local-test-room",
+    "rule": {
+      "dispatch_rule_individual": {
+        "room_prefix": "sip-test-"
+      }
+    }
+  }
+}
