@@ -1,4 +1,4 @@
-"""Local Qwen3-TTS service.
+"""Local TTS service.
 
 Protocol (used by ``agent/local_plugins/tts.py``):
 
@@ -6,11 +6,20 @@ Protocol (used by ``agent/local_plugins/tts.py``):
     {"text": "...", "speaker": "Aiden", "language": "ru"}
     -> chunked raw PCM16LE mono, headers X-Sample-Rate / X-Channels
 
-Generation itself is blocking in qwen-tts 0.1.1 (the package does not expose
-incremental codec decoding yet), so the first byte arrives after the sentence
-is synthesized. The response is still chunked, and the agent plays audio as
-soon as the first chunks arrive. Splitting text per sentence (LiveKit does
-this) keeps each request short.
+Two backends are available via ``TTS_BACKEND``:
+
+- ``qwen`` (default): Qwen3-TTS-12Hz-0.6B-CustomVoice. Best voice quality, but
+  generation is blocking in qwen-tts 0.1.1 (no incremental codec decoding) and
+  measures ~1.5x slower than real time on this GPU (the bottleneck is the
+  per-frame Python decode loop, GPU sits at ~17%), which makes a live phone
+  conversation feel laggy.
+- ``silero``: Silero TTS v5 (ru). Much faster (well above real time on CPU)
+  at the cost of a more robotic voice. Selected for low-latency calls.
+
+The first byte arrives after the whole text fragment is synthesized; the
+response is still chunked, and the agent plays audio as soon as the first
+chunks arrive. Splitting text per sentence (LiveKit does this) keeps each
+request short.
 """
 
 from __future__ import annotations
@@ -36,6 +45,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("qwen3-tts")
 
+BACKEND = os.getenv("TTS_BACKEND", "qwen").strip().lower()
 MODEL_ID = os.getenv("TTS_MODEL_ID", "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice")
 DEVICE = os.getenv("DEVICE", "cuda" if torch.cuda.is_available() else "cpu")
 DEVICE_MAP = os.getenv("TTS_DEVICE_MAP") or (
@@ -214,7 +224,117 @@ class Engine:
         return (pcm * 32767.0).astype(np.int16).tobytes()
 
 
-engine = Engine()
+class SileroEngine:
+    """Silero TTS v5 (Russian) backend: low latency, CPU-friendly.
+
+    Same interface as :class:`Engine` so the HTTP layer does not care which
+    backend is active.
+    """
+
+    SILERO_SPEAKERS = ["aidar", "baya", "kseniya", "eugene", "xenia"]
+
+    def __init__(self) -> None:
+        self._model = None
+        self._lock = asyncio.Lock()
+        self.supported_speakers: list[str] = []
+        self.supported_languages = ["russian"]
+        self.default_speaker = DEFAULT_SPEAKER
+        self.source_sample_rate = 48000
+        self.ready = False
+
+    def load(self) -> None:
+        logger.info("loading Silero TTS v5_ru via torch.hub (cpu)")
+        self._model, _ = torch.hub.load(
+            "snakers4/silero-models",
+            "silero_tts",
+            language="ru",
+            speaker="v5_ru",
+            trust_repo=True,
+        )
+        self.source_sample_rate = int(getattr(self._model, "sample_rate", 48000))
+        hub_speakers = getattr(self._model, "speakers", None) or []
+        self.supported_speakers = list(hub_speakers) or list(self.SILERO_SPEAKERS)
+
+        match = next(
+            (
+                s
+                for s in self.supported_speakers
+                if s.lower() == DEFAULT_SPEAKER.lower()
+            ),
+            None,
+        )
+        if match is not None:
+            self.default_speaker = match
+        else:
+            self.default_speaker = (
+                "aidar"
+                if "aidar" in self.supported_speakers
+                else self.supported_speakers[0]
+            )
+            if DEFAULT_SPEAKER.lower() != self.default_speaker.lower():
+                logger.warning(
+                    "speaker %r is not supported by Silero, falling back to %r",
+                    DEFAULT_SPEAKER,
+                    self.default_speaker,
+                )
+        self.ready = True
+        logger.info(
+            "Silero TTS loaded; speakers=%s sample_rate=%d",
+            self.supported_speakers,
+            self.source_sample_rate,
+        )
+
+    def warmup(self) -> None:
+        try:
+            self._synthesize_sync("Проверка связи.", self.default_speaker)
+            logger.info("Silero TTS warmup done")
+        except Exception:
+            logger.exception("Silero TTS warmup failed (service will still start)")
+
+    def check_speaker(self, speaker: str) -> str:
+        if not self.supported_speakers:
+            return speaker
+        for item in self.supported_speakers:
+            if item.lower() == speaker.lower():
+                return item
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": f"unsupported speaker: {speaker}",
+                "supported": self.supported_speakers,
+            },
+        )
+
+    async def synthesize(
+        self,
+        text: str,
+        speaker: str,
+        language: str,
+        instruct: str | None,
+    ) -> bytes:
+        speaker = self.check_speaker(speaker)
+        async with self._lock:
+            return await asyncio.to_thread(self._synthesize_sync, text, speaker)
+
+    def _synthesize_sync(self, text: str, speaker: str) -> bytes:
+        if self._model is None:
+            raise RuntimeError("model is not loaded")
+
+        audio = self._model.apply_tts(
+            text=text,
+            speaker=speaker,
+            sample_rate=self.source_sample_rate,
+        )
+        waveform = torch.as_tensor(audio, dtype=torch.float32).flatten()
+        if self.source_sample_rate != OUTPUT_SAMPLE_RATE:
+            waveform = torchaudio.functional.resample(
+                waveform, self.source_sample_rate, OUTPUT_SAMPLE_RATE
+            )
+        pcm = np.clip(waveform.numpy(), -1.0, 1.0)
+        return (pcm * 32767.0).astype(np.int16).tobytes()
+
+
+engine = SileroEngine() if BACKEND == "silero" else Engine()
 
 
 class TTSRequest(BaseModel):
@@ -238,7 +358,8 @@ app = FastAPI(title="Qwen3-TTS", lifespan=lifespan)
 async def health():
     return {
         "status": "ok" if engine.ready else "loading",
-        "model": MODEL_ID,
+        "backend": BACKEND,
+        "model": MODEL_ID if BACKEND == "qwen" else "silero/v5_ru",
         "device": DEVICE_MAP,
         "default_speaker": engine.default_speaker,
         "speakers": engine.supported_speakers,
