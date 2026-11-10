@@ -241,6 +241,7 @@ class SileroEngine:
         self.default_speaker = DEFAULT_SPEAKER
         self.source_sample_rate = 48000
         self.ready = False
+        self._warned_speakers: set[str] = set()
 
     def load(self) -> None:
         logger.info("loading Silero TTS v5_ru via torch.hub (cpu)")
@@ -297,13 +298,16 @@ class SileroEngine:
         for item in self.supported_speakers:
             if item.lower() == speaker.lower():
                 return item
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": f"unsupported speaker: {speaker}",
-                "supported": self.supported_speakers,
-            },
-        )
+        # Fall back to the default voice instead of failing the reply: a
+        # speaker configured for another backend must not silence the agent.
+        if speaker.lower() not in self._warned_speakers:
+            self._warned_speakers.add(speaker.lower())
+            logger.warning(
+                "speaker %r is not supported by Silero, using %r",
+                speaker,
+                self.default_speaker,
+            )
+        return self.default_speaker
 
     async def synthesize(
         self,

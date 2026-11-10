@@ -69,6 +69,9 @@ class _IntroAgent(Agent):
 
     async def on_user_turn_completed(self, turn_ctx, new_message) -> None:
         if self.scripted_phase:
+            logger.info(
+                "scripted phase: suppressed LLM reply to %r", new_message.text_content
+            )
             raise StopResponse()
 
 
@@ -257,7 +260,11 @@ async def entrypoint(ctx: JobContext):
     else:
         logger.warning("connect check: no verbal answer, introducing ourselves anyway")
 
-    await session.say(INTRO, add_to_chat_ctx=True)
+    # The client has just answered the connection check, so their speech tail
+    # often still overlaps the start of the intro and barge-in would cut it
+    # off after the first word. The intro is short and scripted; play it
+    # without interruptions.
+    await session.say(INTRO, allow_interruptions=False, add_to_chat_ctx=True)
 
     # The scripted part is over; the LLM now handles the conversation. The
     # flag flips only after the intro has played out, so a client who
