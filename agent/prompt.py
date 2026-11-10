@@ -8,7 +8,7 @@ the model improvise the rest of the conversation.
 
 from __future__ import annotations
 
-AGENT_NAME = "Александр"
+AGENT_NAME = "Александр Кузнецов"
 STORE_NAME = "ОПТ ТУ БИ"
 STORE_ALIAS = "OPT2B"
 
