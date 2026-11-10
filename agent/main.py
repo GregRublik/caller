@@ -17,7 +17,6 @@ from livekit.agents import stt as lk_stt
 from livekit.plugins import openai, silero
 
 from local_plugins import GigaAMSTT, Qwen3TTS
-from prompt import GREETING, SYSTEM_PROMPT
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
@@ -132,7 +131,9 @@ async def entrypoint(ctx: JobContext):
         max_endpointing_delay=2.5,
     )
 
-    agent = Agent(instructions=SYSTEM_PROMPT)
+    # No system prompt: the agent is a plain conversation partner. The Agent
+    # API requires an instructions string, so pass an empty one.
+    agent = Agent(instructions="")
     # SIP delivers G.711 at 8 kHz. RoomIO resamples the participant's audio
     # once to 16 kHz, which is what GigaAM expects, so the STT plugin does not
     # have to resample again in the common case.
@@ -142,9 +143,6 @@ async def entrypoint(ctx: JobContext):
         room_input_options=RoomInputOptions(audio_sample_rate=16000),
     )
 
-    # The greeting is spoken verbatim and added to the chat context, so the
-    # LLM knows it has already greeted the customer.
-    await session.say(GREETING, add_to_chat_ctx=True)
     logger.info("agent session is ready")
 
 

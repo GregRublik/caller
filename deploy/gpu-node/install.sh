@@ -29,7 +29,7 @@ echo "== app venv (stt + tts + agent)"
 uv venv --allow-existing --python 3.12 "$VENVS/app"
 uv pip install --python "$APP_PY" \
   --index-url https://download.pytorch.org/whl/cu128 \
-  torch==2.8.0 torchaudio==2.8.0
+  torch==2.8.0 torchaudio==2.8.0 torchvision==0.23.0
 uv pip install --python "$APP_PY" \
   transformers==4.57.3 accelerate==1.12.0 \
   hydra-core 'omegaconf>=2.3,<3' 'sentencepiece>=0.2,<1' \
@@ -40,6 +40,14 @@ uv pip install --python "$APP_PY" \
   'httpx>=0.27,<1' 'python-dotenv>=1.0,<2'
 # --no-deps: qwen-tts pulls gradio for its demo UI, which the service does not use.
 uv pip install --python "$APP_PY" --no-deps qwen-tts==0.1.1
+# GigaAM's remote code imports pyannote.audio (for VAD). Installing it without
+# constraints upgrades torch (and leaves torchaudio mismatched), so pin the
+# whole trio while resolving pyannote's dependencies.
+printf 'torch==2.8.0\ntorchaudio==2.8.0\ntorchvision==0.23.0\n' \
+  > /tmp/caller-torch-constraints.txt
+uv pip install --python "$APP_PY" -c /tmp/caller-torch-constraints.txt \
+  --index-url https://download.pytorch.org/whl/cu128 \
+  --extra-index-url https://pypi.org/simple pyannote.audio
 # Rust downloader for huggingface_hub: several times faster on multi-GB models.
 uv pip install --python "$APP_PY" hf-transfer
 

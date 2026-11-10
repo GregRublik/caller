@@ -30,7 +30,11 @@ class Qwen3TTS(tts.TTS):
         timeout: float = 60.0,
     ) -> None:
         super().__init__(
-            capabilities=tts.TTSCapabilities(streaming=True),
+            # The service takes a whole text and returns audio; it is not a
+            # true streaming TTS. Declaring streaming=False makes AgentSession
+            # wrap this plugin in tts.StreamAdapter automatically (the base
+            # class only raises NotImplementedError for stream() if we lie).
+            capabilities=tts.TTSCapabilities(streaming=False),
             sample_rate=sample_rate,
             num_channels=1,
         )

@@ -48,6 +48,24 @@ DEFAULT_LANGUAGE = os.getenv("TTS_LANGUAGE", "ru")
 OUTPUT_SAMPLE_RATE = int(os.getenv("TTS_OUTPUT_SAMPLE_RATE", "24000"))
 CHUNK_MS = int(os.getenv("TTS_CHUNK_MS", "100"))
 
+# Voice stability. LiveKit synthesizes the reply sentence by sentence, so every
+# request starts from scratch; with the model's default sampling (temperature
+# 0.9, top_k 50) the timbre drifts from sentence to sentence. Greedy decoding
+# (the default here) keeps the speaker's voice identical. If sampling is
+# wanted, set TTS_DO_SAMPLE=1 and optionally TTS_SEED to pin the RNG.
+DO_SAMPLE = os.getenv("TTS_DO_SAMPLE", "0").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+TEMPERATURE = float(os.getenv("TTS_TEMPERATURE", "0.7"))
+TOP_K = int(os.getenv("TTS_TOP_K", "20"))
+TOP_P = float(os.getenv("TTS_TOP_P", "0.9"))
+REPETITION_PENALTY = float(os.getenv("TTS_REPETITION_PENALTY", "1.05"))
+_seed = os.getenv("TTS_SEED", "").strip()
+SEED = int(_seed) if _seed else None
+
 LANGUAGE_NAMES = {
     "ru": "Russian",
     "en": "English",
@@ -166,11 +184,26 @@ class Engine:
         if self._model is None:
             raise RuntimeError("model is not loaded")
 
+        if SEED is not None:
+            torch.manual_seed(SEED)
+
+        gen_kwargs: dict[str, object] = {
+            "do_sample": DO_SAMPLE,
+            "repetition_penalty": REPETITION_PENALTY,
+        }
+        if DO_SAMPLE:
+            gen_kwargs.update(temperature=TEMPERATURE, top_k=TOP_K, top_p=TOP_P)
+        else:
+            # Explicit neutral values: HF generate warns when these conflict
+            # with do_sample=False.
+            gen_kwargs.update(temperature=1.0, top_k=0, top_p=1.0)
+
         wavs, sample_rate = self._model.generate_custom_voice(
             text=text,
             speaker=speaker,
             language=language,
             instruct=instruct,
+            **gen_kwargs,
         )
         waveform = torch.from_numpy(np.asarray(wavs[0], dtype=np.float32))
         if sample_rate != OUTPUT_SAMPLE_RATE:
