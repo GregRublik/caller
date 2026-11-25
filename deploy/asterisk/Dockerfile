@@ -1,13 +1,17 @@
 FROM alpine:3.21
 
-RUN apk add --no-cache asterisk
+RUN apk add --no-cache asterisk gettext
 
-# Only these four files are replaced; the rest of the package config stays.
+# Only these files are replaced; the rest of the package config stays.
 COPY config/pjsip.conf /etc/asterisk/pjsip.conf
+COPY config/pjsip.batc.conf.tmpl /etc/asterisk/pjsip.batc.conf.tmpl
 COPY config/extensions.conf /etc/asterisk/extensions.conf
 COPY config/modules.conf /etc/asterisk/modules.conf
 COPY config/rtp.conf /etc/asterisk/rtp.conf
+COPY entrypoint.sh /entrypoint.sh
+
+RUN chmod +x /entrypoint.sh
 
 EXPOSE 5062/udp 5062/tcp 21000-21100/udp
 
-CMD ["asterisk", "-f", "-vvv"]
+ENTRYPOINT ["/entrypoint.sh"]

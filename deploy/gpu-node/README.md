@@ -8,13 +8,14 @@
 | Параметр | Минимум | Рекомендуется |
 |----------|---------|---------------|
 | GPU | 48 ГБ VRAM (с FP8) | RTX PRO 6000 96 ГБ |
-| Диск | 48 ГБ (FP8) | ≥ 100 ГБ (bf16 + запас) |
+| Диск | 64 ГБ (FP8 + ESpeech) | ≥ 100 ГБ (bf16 + запас) |
 | RAM | 32 ГБ | 64–96 ГБ |
 | Образ | Vast base image (есть `uv`, `supervisor`, `ffmpeg`, CUDA) | — |
 
 Модели: Qwen3-14B bf16 —29.6 ГБ, FP8 —16.3 ГБ, GigaAM-v3 —0.45 ГБ,
-Qwen3-TTS 0.6B —2.5 ГБ. Окружения Python —~10–12 ГБ. На диске32 ГБ bf16 не
-поместится, поэтому там используется FP8-чекпоинт (`LLM_MODEL_ID=Qwen/Qwen3-14B-FP8`).
+ESpeech-TTS —2.7 ГБ. Окружения Python —~15–18 ГБ (для f5-tts отдельный
+venv `tts`). На диске32 ГБ bf16 не поместится, поэтому там используется
+FP8-чекпоинт (`LLM_MODEL_ID=Qwen/Qwen3-14B-FP8`).
 
 **Персистентность:** на vast.ai stop/start сохраняет файловую систему, а
 recycle/destroy — стирает. `/workspace` не volume, если инстанс создан без него.
@@ -41,7 +42,8 @@ git clone https://github.com/GregRublik/caller.git /workspace/caller
 # 2. .env (на инстансе):
 cp /workspace/caller/deploy/gpu-node/env.gpu.example /workspace/caller/.env
 chmod 600 /workspace/caller/.env
-# заполнить HF_TOKEN, VLLM_API_KEY, LIVEKIT_*, при необходимости LLM_MODEL_ID
+# заполнить HF_TOKEN, VLLM_API_KEY, LIVEKIT_*, TTS_REF_TEXT;
+# положить запись голоса агента в /workspace/caller/voice/ref.wav
 
 # 3. Установка (окружения + модели + supervisor):
 /workspace/caller/deploy/gpu-node/install.sh
@@ -79,6 +81,10 @@ tail -f /workspace/caller/logs/llm.log
 Порты (только localhost): vLLM —8000, STT —8001, TTS —8002. Наружу ничего
 не публикуется: агенту входящие соединения не нужны, он сам подключается к
 LiveKit по `wss://`.
+
+TTS — ESpeech-TTS: сервис клонирует голос из `voice/ref.wav`, поэтому без
+записи-референса и её точной транскрипции (`TTS_REF_TEXT`) он не стартует
+(статус `error` в `/health`).
 
 ## Проверки
 

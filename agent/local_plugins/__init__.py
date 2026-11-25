@@ -1,6 +1,6 @@
-"""Thin LiveKit plugins that talk to the local STT/TTS HTTP services."""
+"""Thin LiveKit plugins that talk to the separately launched STT/TTS services."""
 
 from .stt import GigaAMSTT
-from .tts import Qwen3TTS
+from .tts import EspeechTTS
 
-__all__ = ["GigaAMSTT", "Qwen3TTS"]
+__all__ = ["GigaAMSTT", "EspeechTTS"]

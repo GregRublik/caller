@@ -1,25 +1,25 @@
-"""Local TTS service.
+"""ESpeech-TTS service.
+
+ESpeech-TTS-1_RL-V2 is a Russian fine-tune of the F5-TTS architecture: a
+336M-parameter DiT flow-matching model that clones a voice from a short
+reference recording. The service therefore needs a reference audio file and
+its exact transcript (``TTS_REF_AUDIO`` / ``TTS_REF_TEXT``).
+
+Russian stress marks are produced by RUAccent (``+`` before the stressed
+vowel). The reference text is accented once at startup; the reference audio
+is preprocessed and cached by f5-tts.
 
 Protocol (used by ``agent/local_plugins/tts.py``):
 
     POST /v1/tts/stream
-    {"text": "...", "speaker": "Aiden", "language": "ru"}
+    {"text": "..."}
     -> chunked raw PCM16LE mono, headers X-Sample-Rate / X-Channels
 
-Two backends are available via ``TTS_BACKEND``:
+    POST /v1/tts
+    same body -> WAV file (for auditioning with curl)
 
-- ``qwen`` (default): Qwen3-TTS-12Hz-0.6B-CustomVoice. Best voice quality, but
-  generation is blocking in qwen-tts 0.1.1 (no incremental codec decoding) and
-  measures ~1.5x slower than real time on this GPU (the bottleneck is the
-  per-frame Python decode loop, GPU sits at ~17%), which makes a live phone
-  conversation feel laggy.
-- ``silero``: Silero TTS v5 (ru). Much faster (well above real time on CPU)
-  at the cost of a more robotic voice. Selected for low-latency calls.
-
-The first byte arrives after the whole text fragment is synthesized; the
-response is still chunked, and the agent plays audio as soon as the first
-chunks arrive. Splitting text per sentence (LiveKit does this) keeps each
-request short.
+The whole fragment is synthesized before the first byte is sent; LiveKit
+splits replies into sentences, so fragments stay short.
 """
 
 from __future__ import annotations
@@ -33,319 +33,176 @@ from contextlib import asynccontextmanager
 
 import numpy as np
 import torch
-import torchaudio
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import Response, StreamingResponse
+from f5_tts.infer.utils_infer import (
+    infer_process,
+    load_model,
+    load_vocoder,
+    preprocess_ref_audio_text,
+)
+from f5_tts.model import DiT
 from pydantic import BaseModel, Field
-from qwen_tts import Qwen3TTSModel
+from ruaccent import RUAccent
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
-logger = logging.getLogger("qwen3-tts")
+logger = logging.getLogger("espeech-tts")
 
-BACKEND = os.getenv("TTS_BACKEND", "qwen").strip().lower()
-MODEL_ID = os.getenv("TTS_MODEL_ID", "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice")
+MODEL_REPO = os.getenv("TTS_MODEL_REPO", "ESpeech/ESpeech-TTS-1_RL-V2")
+MODEL_FILE = os.getenv("TTS_MODEL_FILE", "espeech_tts_rlv2.pt")
+VOCAB_FILE = os.getenv("TTS_VOCAB_FILE", "vocab.txt")
+MODEL_PATH = os.getenv("TTS_MODEL_PATH", "").strip()
+VOCAB_PATH = os.getenv("TTS_VOCAB_PATH", "").strip()
+
 DEVICE = os.getenv("DEVICE", "cuda" if torch.cuda.is_available() else "cpu")
-DEVICE_MAP = os.getenv("TTS_DEVICE_MAP") or (
-    "cuda:0" if DEVICE.startswith("cuda") else DEVICE
-)
-DTYPE = torch.bfloat16 if DEVICE.startswith("cuda") else torch.float32
-ATTN_IMPLEMENTATION = os.getenv("TTS_ATTN_IMPLEMENTATION", "sdpa")
-DEFAULT_SPEAKER = os.getenv("TTS_SPEAKER", "Aiden")
-DEFAULT_LANGUAGE = os.getenv("TTS_LANGUAGE", "ru")
-OUTPUT_SAMPLE_RATE = int(os.getenv("TTS_OUTPUT_SAMPLE_RATE", "24000"))
+
+# Voice reference: any 5-15 s clean recording of the agent voice plus its
+# exact transcript. Without both, the service cannot synthesize.
+REF_AUDIO = os.getenv("TTS_REF_AUDIO", "").strip()
+REF_TEXT = os.getenv("TTS_REF_TEXT", "").strip()
+
+# Inference knobs. nfe_step trades quality for speed (32 default; 16 is
+# roughly twice as fast at a small quality cost).
+NFE_STEP = int(os.getenv("TTS_NFE_STEP", "32"))
+CFG_STRENGTH = float(os.getenv("TTS_CFG_STRENGTH", "2.0"))
+SWAY_COEF = float(os.getenv("TTS_SWAY_COEF", "-1"))
+SPEED = float(os.getenv("TTS_SPEED", "1.0"))
+TARGET_RMS = float(os.getenv("TTS_TARGET_RMS", "0.1"))
+
+# Chunk size of the streamed PCM response (does not affect synthesis).
 CHUNK_MS = int(os.getenv("TTS_CHUNK_MS", "100"))
 
-# Voice stability. LiveKit synthesizes the reply sentence by sentence, so every
-# request starts from scratch; with the model's default sampling (temperature
-# 0.9, top_k 50) the timbre drifts from sentence to sentence. Greedy decoding
-# (the default here) keeps the speaker's voice identical. If sampling is
-# wanted, set TTS_DO_SAMPLE=1 and optionally TTS_SEED to pin the RNG.
-DO_SAMPLE = os.getenv("TTS_DO_SAMPLE", "0").strip().lower() in (
-    "1",
-    "true",
-    "yes",
-    "on",
-)
-TEMPERATURE = float(os.getenv("TTS_TEMPERATURE", "0.7"))
-TOP_K = int(os.getenv("TTS_TOP_K", "20"))
-TOP_P = float(os.getenv("TTS_TOP_P", "0.9"))
-REPETITION_PENALTY = float(os.getenv("TTS_REPETITION_PENALTY", "1.05"))
-_seed = os.getenv("TTS_SEED", "").strip()
-SEED = int(_seed) if _seed else None
-
-LANGUAGE_NAMES = {
-    "ru": "Russian",
-    "en": "English",
-    "zh": "Chinese",
-    "ja": "Japanese",
-    "ko": "Korean",
-    "de": "German",
-    "fr": "French",
-    "pt": "Portuguese",
-    "es": "Spanish",
-    "it": "Italian",
-}
+# ESpeech checkpoint architecture (as specified by its model card).
+MODEL_CFG = dict(dim=1024, depth=22, heads=16, ff_mult=2, text_dim=512, conv_layers=4)
 
 
-def _language_name(value: str | None) -> str:
-    value = (value or DEFAULT_LANGUAGE).strip()
-    return LANGUAGE_NAMES.get(value.lower(), value)
+def _noop(*args, **kwargs) -> None:
+    return None
 
 
 class Engine:
     def __init__(self) -> None:
-        self._model: Qwen3TTSModel | None = None
-        self._lock = asyncio.Lock()
-        self.supported_speakers: list[str] = []
-        self.supported_languages: list[str] = []
-        self.default_speaker = DEFAULT_SPEAKER
-        self.ready = False
-
-    def load(self) -> None:
-        logger.info(
-            "loading %s on %s (dtype=%s, attn=%s)",
-            MODEL_ID,
-            DEVICE_MAP,
-            DTYPE,
-            ATTN_IMPLEMENTATION,
-        )
-        self._model = Qwen3TTSModel.from_pretrained(
-            MODEL_ID,
-            device_map=DEVICE_MAP,
-            dtype=DTYPE,
-            attn_implementation=ATTN_IMPLEMENTATION,
-        )
-        self.supported_speakers = self._model.get_supported_speakers() or []
-        self.supported_languages = self._model.get_supported_languages() or []
-
-        if self.supported_speakers:
-            match = next(
-                (
-                    s
-                    for s in self.supported_speakers
-                    if s.lower() == DEFAULT_SPEAKER.lower()
-                ),
-                None,
-            )
-            if match is None:
-                self.default_speaker = self.supported_speakers[0]
-                logger.warning(
-                    "speaker %r is not supported, falling back to %r",
-                    DEFAULT_SPEAKER,
-                    self.default_speaker,
-                )
-            else:
-                self.default_speaker = match
-
-        self.ready = True
-        logger.info(
-            "Qwen3-TTS loaded; speakers=%s languages=%s",
-            self.supported_speakers,
-            self.supported_languages,
-        )
-
-    def warmup(self) -> None:
-        try:
-            self._synthesize_sync("Проверка связи.", self.default_speaker, "Russian")
-            logger.info("Qwen3-TTS warmup done")
-        except Exception:
-            logger.exception("Qwen3-TTS warmup failed (service will still start)")
-
-    def check_speaker(self, speaker: str) -> str:
-        if not self.supported_speakers:
-            return speaker
-        for item in self.supported_speakers:
-            if item.lower() == speaker.lower():
-                return item
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": f"unsupported speaker: {speaker}",
-                "supported": self.supported_speakers,
-            },
-        )
-
-    async def synthesize(
-        self,
-        text: str,
-        speaker: str,
-        language: str,
-        instruct: str | None,
-    ) -> bytes:
-        speaker = self.check_speaker(speaker)
-        async with self._lock:
-            try:
-                return await asyncio.to_thread(
-                    self._synthesize_sync, text, speaker, language, instruct
-                )
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    def _synthesize_sync(
-        self,
-        text: str,
-        speaker: str,
-        language: str,
-        instruct: str | None = None,
-    ) -> bytes:
-        if self._model is None:
-            raise RuntimeError("model is not loaded")
-
-        if SEED is not None:
-            torch.manual_seed(SEED)
-
-        gen_kwargs: dict[str, object] = {
-            "do_sample": DO_SAMPLE,
-            "repetition_penalty": REPETITION_PENALTY,
-        }
-        if DO_SAMPLE:
-            gen_kwargs.update(temperature=TEMPERATURE, top_k=TOP_K, top_p=TOP_P)
-        else:
-            # Explicit neutral values: HF generate warns when these conflict
-            # with do_sample=False.
-            gen_kwargs.update(temperature=1.0, top_k=0, top_p=1.0)
-
-        wavs, sample_rate = self._model.generate_custom_voice(
-            text=text,
-            speaker=speaker,
-            language=language,
-            instruct=instruct,
-            **gen_kwargs,
-        )
-        waveform = torch.from_numpy(np.asarray(wavs[0], dtype=np.float32))
-        if sample_rate != OUTPUT_SAMPLE_RATE:
-            waveform = torchaudio.functional.resample(
-                waveform, sample_rate, OUTPUT_SAMPLE_RATE
-            )
-        pcm = np.clip(waveform.numpy(), -1.0, 1.0)
-        return (pcm * 32767.0).astype(np.int16).tobytes()
-
-
-class SileroEngine:
-    """Silero TTS v5 (Russian) backend: low latency, CPU-friendly.
-
-    Same interface as :class:`Engine` so the HTTP layer does not care which
-    backend is active.
-    """
-
-    SILERO_SPEAKERS = ["aidar", "baya", "kseniya", "eugene", "xenia"]
-
-    def __init__(self) -> None:
         self._model = None
+        self._vocoder = None
+        self._accentizer: RUAccent | None = None
+        self._ref_audio: str | None = None
+        self._ref_text: str | None = None
         self._lock = asyncio.Lock()
-        self.supported_speakers: list[str] = []
-        self.supported_languages = ["russian"]
-        self.default_speaker = DEFAULT_SPEAKER
-        self.source_sample_rate = 48000
         self.ready = False
-        self._warned_speakers: set[str] = set()
+        self.last_error: str | None = None
+
+    def _resolve_paths(self) -> tuple[str, str]:
+        model_path, vocab_path = MODEL_PATH, VOCAB_PATH
+        if not model_path or not vocab_path:
+            from huggingface_hub import hf_hub_download
+
+            if not model_path:
+                model_path = hf_hub_download(MODEL_REPO, MODEL_FILE)
+            if not vocab_path:
+                vocab_path = hf_hub_download(MODEL_REPO, VOCAB_FILE)
+        return model_path, vocab_path
+
+    def _accent(self, text: str) -> str:
+        if "+" in text:
+            return text
+        assert self._accentizer is not None
+        return self._accentizer.process_all(text)
 
     def load(self) -> None:
-        logger.info("loading Silero TTS v5_ru via torch.hub (cpu)")
-        self._model, _ = torch.hub.load(
-            "snakers4/silero-models",
-            "silero_tts",
-            language="ru",
-            speaker="v5_ru",
-            trust_repo=True,
-        )
-        self.source_sample_rate = int(getattr(self._model, "sample_rate", 48000))
-        hub_speakers = getattr(self._model, "speakers", None) or []
-        self.supported_speakers = list(hub_speakers) or list(self.SILERO_SPEAKERS)
-
-        match = next(
-            (
-                s
-                for s in self.supported_speakers
-                if s.lower() == DEFAULT_SPEAKER.lower()
-            ),
-            None,
-        )
-        if match is not None:
-            self.default_speaker = match
-        else:
-            self.default_speaker = (
-                "aidar"
-                if "aidar" in self.supported_speakers
-                else self.supported_speakers[0]
-            )
-            if DEFAULT_SPEAKER.lower() != self.default_speaker.lower():
-                logger.warning(
-                    "speaker %r is not supported by Silero, falling back to %r",
-                    DEFAULT_SPEAKER,
-                    self.default_speaker,
+        try:
+            if not REF_AUDIO or not REF_TEXT:
+                raise RuntimeError(
+                    "TTS_REF_AUDIO and TTS_REF_TEXT must be set "
+                    "(voice reference recording and its exact transcript)"
                 )
-        self.ready = True
-        logger.info(
-            "Silero TTS loaded; speakers=%s sample_rate=%d",
-            self.supported_speakers,
-            self.source_sample_rate,
-        )
+
+            model_path, vocab_path = self._resolve_paths()
+            logger.info(
+                "loading ESpeech-TTS: model=%s vocab=%s device=%s nfe=%d",
+                model_path,
+                vocab_path,
+                DEVICE,
+                NFE_STEP,
+            )
+            self._model = load_model(
+                DiT,
+                MODEL_CFG,
+                model_path,
+                vocab_file=vocab_path,
+                device=DEVICE,
+            )
+            self._vocoder = load_vocoder(device=DEVICE)
+
+            logger.info("loading RUAccent")
+            self._accentizer = RUAccent()
+            self._accentizer.load(
+                omograph_model_size="turbo3.1",
+                use_dictionary=True,
+                tiny_mode=False,
+            )
+
+            self._ref_audio, self._ref_text = preprocess_ref_audio_text(
+                REF_AUDIO,
+                self._accent(REF_TEXT),
+                show_info=_noop,
+            )
+            self.ready = True
+            logger.info("ESpeech-TTS ready; reference=%s", REF_AUDIO)
+        except Exception as exc:  # keep the service up and report via /health
+            self.last_error = f"{type(exc).__name__}: {exc}"
+            logger.exception("ESpeech-TTS init failed")
 
     def warmup(self) -> None:
+        if not self.ready:
+            return
         try:
-            self._synthesize_sync("Проверка связи.", self.default_speaker)
-            logger.info("Silero TTS warmup done")
+            self._synthesize_sync("Проверка связи.")
+            logger.info("ESpeech-TTS warmup done")
         except Exception:
-            logger.exception("Silero TTS warmup failed (service will still start)")
+            logger.exception("ESpeech-TTS warmup failed")
 
-    def check_speaker(self, speaker: str) -> str:
-        if not self.supported_speakers:
-            return speaker
-        for item in self.supported_speakers:
-            if item.lower() == speaker.lower():
-                return item
-        # Fall back to the default voice instead of failing the reply: a
-        # speaker configured for another backend must not silence the agent.
-        if speaker.lower() not in self._warned_speakers:
-            self._warned_speakers.add(speaker.lower())
-            logger.warning(
-                "speaker %r is not supported by Silero, using %r",
-                speaker,
-                self.default_speaker,
+    async def synthesize(self, text: str) -> tuple[bytes, int]:
+        if not self.ready:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "tts engine is not ready",
+                    "detail": self.last_error,
+                },
             )
-        return self.default_speaker
-
-    async def synthesize(
-        self,
-        text: str,
-        speaker: str,
-        language: str,
-        instruct: str | None,
-    ) -> bytes:
-        speaker = self.check_speaker(speaker)
         async with self._lock:
-            return await asyncio.to_thread(self._synthesize_sync, text, speaker)
+            return await asyncio.to_thread(self._synthesize_sync, text)
 
-    def _synthesize_sync(self, text: str, speaker: str) -> bytes:
-        if self._model is None:
+    def _synthesize_sync(self, text: str) -> tuple[bytes, int]:
+        if self._model is None or self._vocoder is None:
             raise RuntimeError("model is not loaded")
 
-        audio = self._model.apply_tts(
-            text=text,
-            speaker=speaker,
-            sample_rate=self.source_sample_rate,
+        audio, sample_rate, _ = infer_process(
+            self._ref_audio,
+            self._ref_text,
+            self._accent(text),
+            self._model,
+            self._vocoder,
+            show_info=_noop,
+            target_rms=TARGET_RMS,
+            nfe_step=NFE_STEP,
+            cfg_strength=CFG_STRENGTH,
+            sway_sampling_coef=SWAY_COEF,
+            speed=SPEED,
+            device=DEVICE,
         )
-        waveform = torch.as_tensor(audio, dtype=torch.float32).flatten()
-        if self.source_sample_rate != OUTPUT_SAMPLE_RATE:
-            waveform = torchaudio.functional.resample(
-                waveform, self.source_sample_rate, OUTPUT_SAMPLE_RATE
-            )
-        pcm = np.clip(waveform.numpy(), -1.0, 1.0)
-        return (pcm * 32767.0).astype(np.int16).tobytes()
+        if audio is None:
+            raise RuntimeError("no audio generated")
+
+        waveform = np.clip(np.asarray(audio, dtype=np.float32), -1.0, 1.0)
+        pcm = (waveform * 32767.0).astype(np.int16).tobytes()
+        return pcm, int(sample_rate)
 
 
-engine = SileroEngine() if BACKEND == "silero" else Engine()
-
-
-class TTSRequest(BaseModel):
-    text: str = Field(min_length=1, max_length=2000)
-    speaker: str | None = None
-    language: str = DEFAULT_LANGUAGE
-    instruct: str | None = None
+engine = Engine()
 
 
 @asynccontextmanager
@@ -355,20 +212,29 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Qwen3-TTS", lifespan=lifespan)
+app = FastAPI(title="ESpeech-TTS", lifespan=lifespan)
+
+
+class TTSRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=2000)
 
 
 @app.get("/health")
 async def health():
+    if engine.ready:
+        status = "ok"
+    elif engine.last_error:
+        status = "error"
+    else:
+        status = "loading"
     return {
-        "status": "ok" if engine.ready else "loading",
-        "backend": BACKEND,
-        "model": MODEL_ID if BACKEND == "qwen" else "silero/v5_ru",
-        "device": DEVICE_MAP,
-        "default_speaker": engine.default_speaker,
-        "speakers": engine.supported_speakers,
-        "languages": engine.supported_languages,
-        "sample_rate": OUTPUT_SAMPLE_RATE,
+        "status": status,
+        "backend": "espeech",
+        "model": MODEL_REPO,
+        "device": DEVICE,
+        "nfe_step": NFE_STEP,
+        "ref_audio": REF_AUDIO or None,
+        "error": engine.last_error,
     }
 
 
@@ -378,15 +244,10 @@ async def tts_stream(request: TTSRequest):
     if not text:
         raise HTTPException(status_code=400, detail="empty text")
 
-    pcm = await engine.synthesize(
-        text=text,
-        speaker=request.speaker or engine.default_speaker,
-        language=_language_name(request.language),
-        instruct=request.instruct,
-    )
+    pcm, sample_rate = await engine.synthesize(text)
 
     async def chunks():
-        step = max(2, int(OUTPUT_SAMPLE_RATE * CHUNK_MS / 1000) * 2)
+        step = max(2, int(sample_rate * CHUNK_MS / 1000) * 2)
         for offset in range(0, len(pcm), step):
             yield pcm[offset : offset + step]
             await asyncio.sleep(0)
@@ -395,7 +256,7 @@ async def tts_stream(request: TTSRequest):
         chunks(),
         media_type="audio/pcm",
         headers={
-            "x-sample-rate": str(OUTPUT_SAMPLE_RATE),
+            "x-sample-rate": str(sample_rate),
             "x-channels": "1",
             "cache-control": "no-store",
         },
@@ -409,17 +270,12 @@ async def tts_wav(request: TTSRequest):
     if not text:
         raise HTTPException(status_code=400, detail="empty text")
 
-    pcm = await engine.synthesize(
-        text=text,
-        speaker=request.speaker or engine.default_speaker,
-        language=_language_name(request.language),
-        instruct=request.instruct,
-    )
+    pcm, sample_rate = await engine.synthesize(text)
 
     buffer = io.BytesIO()
     with wave.open(buffer, "wb") as wav:
         wav.setnchannels(1)
         wav.setsampwidth(2)
-        wav.setframerate(OUTPUT_SAMPLE_RATE)
+        wav.setframerate(sample_rate)
         wav.writeframes(pcm)
     return Response(buffer.getvalue(), media_type="audio/wav")

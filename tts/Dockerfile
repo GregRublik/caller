@@ -20,8 +20,6 @@ RUN pip install --no-cache-dir \
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-# --no-deps: qwen-tts pulls gradio for its demo UI, which the service does not use.
-RUN pip install --no-cache-dir --no-deps qwen-tts==0.1.1
 
 COPY server.py .
 

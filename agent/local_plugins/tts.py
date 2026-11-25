@@ -1,7 +1,8 @@
-"""LiveKit TTS plugin backed by the local Qwen3-TTS service.
+"""LiveKit TTS plugin backed by the separate ESpeech-TTS service.
 
-The service returns raw PCM16LE mono audio over a chunked HTTP response. The
-``X-Sample-Rate`` header tells the emitter how to interpret the bytes.
+The service clones the configured reference voice and returns raw PCM16LE mono
+audio over a chunked HTTP response. The ``X-Sample-Rate`` header tells the
+emitter how to interpret the bytes.
 """
 
 from __future__ import annotations
@@ -19,13 +20,11 @@ from livekit.agents import (
 )
 
 
-class Qwen3TTS(tts.TTS):
+class EspeechTTS(tts.TTS):
     def __init__(
         self,
         *,
         base_url: str,
-        voice: str = "Aiden",
-        language: str = "ru",
         sample_rate: int = 24000,
         timeout: float = 60.0,
     ) -> None:
@@ -39,8 +38,6 @@ class Qwen3TTS(tts.TTS):
             num_channels=1,
         )
         self._base_url = base_url.rstrip("/")
-        self._voice = voice
-        self._language = language
         self._timeout = timeout
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(timeout, connect=5.0),
@@ -49,11 +46,11 @@ class Qwen3TTS(tts.TTS):
 
     @property
     def model(self) -> str:
-        return "qwen3-tts"
+        return "espeech-tts"
 
     @property
     def provider(self) -> str:
-        return "local-qwen3-tts"
+        return "local-espeech"
 
     def synthesize(
         self,
@@ -71,7 +68,7 @@ class ChunkedStream(tts.ChunkedStream):
     def __init__(
         self,
         *,
-        tts: Qwen3TTS,
+        tts: EspeechTTS,
         input_text: str,
         conn_options: APIConnectOptions,
     ) -> None:
@@ -85,11 +82,7 @@ class ChunkedStream(tts.ChunkedStream):
             async with self._tts._client.stream(
                 "POST",
                 f"{self._tts._base_url}/v1/tts/stream",
-                json={
-                    "text": self.input_text,
-                    "speaker": self._tts._voice,
-                    "language": self._tts._language,
-                },
+                json={"text": self.input_text},
                 timeout=httpx.Timeout(
                     self._tts._timeout, connect=self._conn_options.timeout
                 ),
@@ -97,7 +90,7 @@ class ChunkedStream(tts.ChunkedStream):
                 if response.status_code != 200:
                     body = await response.aread()
                     raise APIStatusError(
-                        f"Qwen3 TTS returned {response.status_code}: "
+                        f"ESpeech TTS returned {response.status_code}: "
                         f"{body[:500].decode('utf-8', 'replace')}",
                         status_code=response.status_code,
                         request_id=response.headers.get("x-request-id"),

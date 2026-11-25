@@ -8,3 +8,15 @@ services:
     # Host networking lets Asterisk share 127.0.0.1 with the LiveKit
     # containers and use SIP port 5062 + the RTP range directly.
     network_mode: host
+    # Populated by scripts/batc.py create-agent. Run compose with
+    # --env-file ../../.env (or copy these values into a local .env).
+    environment:
+      BATC_AGENT_LOGIN: ${BATC_AGENT_LOGIN:-}
+      BATC_AGENT_PASSWORD: ${BATC_AGENT_PASSWORD:-}
+      BATC_SIP_LOGIN: ${BATC_SIP_LOGIN:-}
+      BATC_SIP_PASSWORD: ${BATC_SIP_PASSWORD:-}
+      BATC_SIP_AUTH_USER: ${BATC_SIP_AUTH_USER:-}
+      BATC_SIP_DOMAIN: ${BATC_SIP_DOMAIN:-sip.exolve.ru}
+      BATC_SIP_PORT: ${BATC_SIP_PORT:-5060}
+      BATC_SIP_FROM_USER: ${BATC_SIP_FROM_USER:-}
+

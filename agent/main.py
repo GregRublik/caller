@@ -17,7 +17,7 @@ from livekit.agents import (
 from livekit.agents import stt as lk_stt
 from livekit.plugins import openai, silero
 
-from local_plugins import GigaAMSTT, Qwen3TTS
+from local_plugins import EspeechTTS, GigaAMSTT
 from prompt import CONNECT_CHECK, CONNECT_RETRY, INTRO, SYSTEM_PROMPT
 from recorder import RoomRecorder
 
@@ -27,14 +27,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger("sales-agent")
 
-LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://llm:8000/v1")
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://127.0.0.1:8000/v1")
 LLM_API_KEY = os.getenv("VLLM_API_KEY", "EMPTY")
 LLM_MODEL = os.getenv("LLM_MODEL", "qwen3-14b")
 
-STT_BASE_URL = os.getenv("STT_BASE_URL", "http://stt:8001")
-TTS_BASE_URL = os.getenv("TTS_BASE_URL", "http://tts:8002")
-TTS_SPEAKER = os.getenv("TTS_SPEAKER", "Aiden")
-TTS_LANGUAGE = os.getenv("TTS_LANGUAGE", "ru")
+STT_BASE_URL = os.getenv("STT_BASE_URL", "http://127.0.0.1:8001")
+TTS_BASE_URL = os.getenv("TTS_BASE_URL", "http://127.0.0.1:8002")
 
 AGENT_NAME = os.getenv("AGENT_NAME", "sales-agent")
 SIP_OUTBOUND_TRUNK_ID = os.getenv("SIP_OUTBOUND_TRUNK_ID", "").strip()
@@ -183,11 +181,7 @@ async def entrypoint(ctx: JobContext):
             # the first token; vLLM understands this chat-template flag.
             extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         ),
-        tts=Qwen3TTS(
-            base_url=TTS_BASE_URL,
-            voice=TTS_SPEAKER,
-            language=TTS_LANGUAGE,
-        ),
+        tts=EspeechTTS(base_url=TTS_BASE_URL),
         min_endpointing_delay=0.4,
         max_endpointing_delay=2.5,
     )
@@ -234,12 +228,16 @@ async def entrypoint(ctx: JobContext):
     if recorder is not None:
         ctx.add_shutdown_callback(recorder.aclose)
 
-        # Stop recording as soon as the call ends. The recorder is itself a
-        # room participant, so without this the job would stay alive (and
-        # keep writing silence) after the caller hangs up.
-        @session.on("close")
-        def _on_session_close(_ev) -> None:
+    # Stop recording and end the job as soon as the call ends. The recorder
+    # is itself a room participant, so without this the job would stay alive
+    # (and keep writing silence) after the caller hangs up. Closing only the
+    # session leaves the job (and its agent room participant) alive as a
+    # silent "ghost" until the room is deleted — shut the job down explicitly.
+    @session.on("close")
+    def _on_session_close(_ev) -> None:
+        if recorder is not None:
             asyncio.create_task(recorder.aclose())
+        ctx.shutdown("session closed")
 
     # Outbound call: make sure the client actually hears us before the pitch.
     # Right after the SIP call is answered the media path is not always up

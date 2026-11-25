@@ -14,7 +14,11 @@ wheels/
 
 # Сгенерированные аудио-примеры голосов
 /samples/
+
+# Локальные/IDE файлы
 archive
 .idea
 .codegraph
-example.py
+
+# macOS
+.DS_Store

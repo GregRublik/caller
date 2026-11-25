@@ -1,0 +1,8 @@
+{
+  "trunk": {
+    "name": "batc-outbound",
+    "address": "127.0.0.1:5062",
+    "numbers": ["74951347654"],
+    "transport": "SIP_TRANSPORT_UDP"
+  }
+}
