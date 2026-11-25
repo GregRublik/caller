@@ -5,7 +5,7 @@ the SIP participant itself (``JobContext.add_sip_participant``). Requires a
 configured ``SIP_OUTBOUND_TRUNK_ID`` in the agent environment.
 
 Usage:
-    python dial.py +79991234567
+    python scripts/dial.py +79991234567
 """
 
 from __future__ import annotations

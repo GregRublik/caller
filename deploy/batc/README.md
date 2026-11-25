@@ -81,7 +81,7 @@ LIVEKIT_API_KEY=... LIVEKIT_API_SECRET=... ./setup-batc.sh
 ## 4. Проверка
 
 ```bash
-.venv/bin/python agent/dial.py +7...
+.venv/bin/python scripts/dial.py +7...
 ```
 
 В логах агента должно появиться `dialing ***1234 via trunk ST_...`, затем

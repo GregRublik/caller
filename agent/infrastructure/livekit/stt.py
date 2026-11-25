@@ -1,13 +1,12 @@
-"""LiveKit STT plugin backed by the local GigaAM-v3 service.
+"""LiveKit STT adapter over :class:`domain.ports.STTPort`.
 
-The service exposes a batch endpoint: it accepts raw PCM16LE mono audio and
-returns a final transcript. LiveKit's ``StreamAdapter`` wraps this plugin and
-uses the shared Silero VAD to cut the microphone stream into utterances.
+The adapter only translates between LiveKit types and the STT port: it
+combines audio frames, resamples to 16 kHz (what GigaAM expects), calls the
+port and maps service errors onto LiveKit API errors.
 """
 
 from __future__ import annotations
 
-import httpx
 from livekit import rtc
 from livekit.agents import (
     DEFAULT_API_CONNECT_OPTIONS,
@@ -20,17 +19,18 @@ from livekit.agents import (
 from livekit.agents.types import NOT_GIVEN, NotGivenOr
 from livekit.agents.utils import AudioBuffer, is_given
 
+from domain.ports import STTPort
+from infrastructure.clients.exceptions import (
+    ServiceError,
+    ServiceResponseError,
+    ServiceTimeout,
+)
+
 
 class GigaAMSTT(stt.STT):
     SAMPLE_RATE = 16000  # GigaAM-v3 is trained on 16 kHz audio
 
-    def __init__(
-        self,
-        *,
-        base_url: str,
-        language: str = "ru",
-        timeout: float = 30.0,
-    ) -> None:
+    def __init__(self, *, service: STTPort, language: str = "ru") -> None:
         super().__init__(
             capabilities=stt.STTCapabilities(
                 streaming=False,
@@ -38,13 +38,8 @@ class GigaAMSTT(stt.STT):
                 offline_recognize=True,
             )
         )
-        self._base_url = base_url.rstrip("/")
+        self._service = service
         self._language = language
-        self._timeout = timeout
-        self._client = httpx.AsyncClient(
-            timeout=httpx.Timeout(timeout, connect=5.0),
-            limits=httpx.Limits(max_connections=20, max_keepalive_connections=20),
-        )
 
     @property
     def model(self) -> str:
@@ -77,39 +72,32 @@ class GigaAMSTT(stt.STT):
         lang = language if is_given(language) else self._language
 
         try:
-            response = await self._client.post(
-                f"{self._base_url}/v1/transcribe",
-                params={
-                    "sample_rate": frame.sample_rate,
-                    "channels": frame.num_channels,
-                },
-                content=frame.data.tobytes(),
-                timeout=httpx.Timeout(self._timeout, connect=conn_options.timeout),
+            result = await self._service.transcribe(
+                frame.data.tobytes(),
+                sample_rate=frame.sample_rate,
+                channels=frame.num_channels,
             )
-        except httpx.TimeoutException as exc:
+        except ServiceTimeout as exc:
             raise APITimeoutError() from exc
-        except httpx.HTTPError as exc:
+        except ServiceResponseError as exc:
+            raise APIStatusError(
+                str(exc),
+                status_code=exc.status_code,
+                body=exc.body,
+            ) from exc
+        except ServiceError as exc:
             raise APIConnectionError() from exc
 
-        if response.status_code != 200:
-            raise APIStatusError(
-                f"GigaAM STT returned {response.status_code}: {response.text[:500]}",
-                status_code=response.status_code,
-                request_id=response.headers.get("x-request-id"),
-                body=response.text[:2000],
-            )
-
-        payload = response.json()
         return stt.SpeechEvent(
             type=stt.SpeechEventType.FINAL_TRANSCRIPT,
             alternatives=[
                 stt.SpeechData(
-                    language=payload.get("language", lang),
-                    text=(payload.get("text") or "").strip(),
+                    language=result.language or lang,
+                    text=result.text,
                     confidence=1.0,
                 )
             ],
         )
 
     async def aclose(self) -> None:
-        await self._client.aclose()
+        await self._service.aclose()

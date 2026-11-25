@@ -24,7 +24,7 @@
 - Запись разговора: скрытый участник-рекордер микширует треки в WAV
   (`agent/recorder.py`, `RECORDINGS_DIR`).
 - Исходящий набор: `ctx.add_sip_participant` по `SIP_OUTBOUND_TRUNK_ID`;
-  номер передаётся в метаданных джоба (`agent/dial.py`).
+  номер передаётся в метаданных джоба (`scripts/dial.py`).
 
 ## Как агент использует сервисы
 
@@ -78,19 +78,43 @@ sequenceDiagram
 ## Структура репозитория
 
 ```
-agent/                  # код агента: main.py, prompt.py, recorder.py,
-                        # local_plugins/{stt,tts}.py, dial.py, requirements.txt
+agent/
+  main.py               # composition root + entrypoint воркера
+  domain/               # ядро: models, ports, prompt (сценарий звонка)
+  application/          # use cases: scripted-phase policy
+  infrastructure/
+    config.py           # настройки (pydantic-settings)
+    clients/            # HTTP-клиенты STT/TTS (реализуют порты)
+    livekit/            # адаптеры LiveKit: plugins, intro agent, recorder,
+                        # session helpers, SIP
+  requirements.txt
+  Dockerfile
 deploy/
   agent-node/           # установка и supervisor ТОЛЬКО агента
   livekit/              # LiveKit Server + SIP на VPS (+ локальный стенд)
   asterisk/             # тестовая АТС / шлюз BATC
   batc/                 # интеграция Exolve BATC
 scripts/batc.py         # создание SIP-сотрудника BATC
+scripts/dial.py         # CLI: исходящий звонок (dispatch агента в комнату)
 docs/rest_api.pdf       # Exolve CRM API
 ```
 
 Модельных сервисов здесь нет — они живут в отдельном проекте
 `sporbita/voice-agent` (`llm/`, `stt/`, `tts/`).
+
+### Слои агента (луковая архитектура)
+
+```
+main.py (composition root)
+   └── infrastructure/      # адаптеры: LiveKit, HTTP-клиенты, конфиг, запись
+         └── application/   # сценарий звонка: scripted-phase policy
+               └── domain/  # модели, порты, тексты и правила сценария
+```
+
+Зависимости смотрят только внутрь: `domain` ничего не импортирует из
+`application`/`infrastructure`; `application` не знает про LiveKit и HTTP;
+`infrastructure` реализует порты `domain` (`STTPort`, `TTSPort`); `main.py` —
+единственное место склейки зависимостей.
 
 ## Запуск
 
