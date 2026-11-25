@@ -2,8 +2,8 @@
 
 Агент на LiveKit Agents: подключается к комнате LiveKit (SIP/WebRTC), ведёт
 исходящий разговор с клиентом голосом. Модельные сервисы — **LLM, STT и TTS** —
-запускаются отдельно (проект `sporbita/voice-agent`, папки `llm/`, `stt/`,
-`tts/`); агент обращается к ним по HTTP и не управляет их процессами.
+запускаются отдельно; агент обращается к ним по HTTP и не управляет их
+процессами. STT и TTS клонируются из отдельных репозиториев (см. ниже).
 
 ```
 Клиент (SIP/WebRTC) ⇄ LiveKit Server (VPS)
@@ -96,11 +96,25 @@ deploy/
   batc/                 # интеграция Exolve BATC
 scripts/batc.py         # создание SIP-сотрудника BATC
 scripts/dial.py         # CLI: исходящий звонок (dispatch агента в комнату)
+llm/                    # vLLM: docker-compose.yml, serve.sh, .env.example, README
 docs/rest_api.pdf       # Exolve CRM API
 ```
 
-Модельных сервисов здесь нет — они живут в отдельном проекте
-`sporbita/voice-agent` (`llm/`, `stt/`, `tts/`).
+Модельных сервисов здесь нет — они запускаются отдельно. Откуда клонировать:
+
+| Сервис | Репозиторий | Адрес по умолчанию |
+|---|---|---|
+| STT (GigaAM-v3) | `https://github.com/GregRublik/caller-stt.git` | `http://127.0.0.1:8001` |
+| TTS (ESpeech-TTS) | `https://github.com/GregRublik/caller-tts.git` | `http://127.0.0.1:8002` |
+| LLM (vLLM, OpenAI API) | запускается из этого репозитория: `llm/docker-compose.yml` (или `llm/serve.sh` без Docker) | `http://127.0.0.1:8000/v1` |
+
+```bash
+git clone https://github.com/GregRublik/caller-stt.git
+git clone https://github.com/GregRublik/caller-tts.git
+```
+
+Каждый сервис запускается по своему README; затем адреса прописываются в
+`.env` агента (`STT_BASE_URL`, `TTS_BASE_URL`, `LLM_BASE_URL`).
 
 ### Слои агента (луковая архитектура)
 

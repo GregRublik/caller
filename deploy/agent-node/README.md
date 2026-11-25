@@ -1,9 +1,13 @@
 # Агент на ноде (только агент)
 
 Здесь устанавливается **только процесс агента**. LLM, STT и TTS — отдельные
-сервисы, запускаются самостоятельно (проект `sporbita/voice-agent`, папки
-`llm/`, `stt/`, `tts/`) и доступны агенту по HTTP. Агент их не запускает и не
-останавливает.
+сервисы, запускаются самостоятельно и доступны агенту по HTTP. Агент их не
+запускает и не останавливает.
+
+- STT (GigaAM-v3): `git clone https://github.com/GregRublik/caller-stt.git`
+- TTS (ESpeech-TTS): `git clone https://github.com/GregRublik/caller-tts.git`
+- LLM (vLLM, OpenAI API): запускается из этого же репозитория — см. `llm/`
+  (`docker compose` на обычном GPU-хосте или `llm/serve.sh` без Docker).
 
 ```
 Агент ──HTTP──► LLM  :8000 (vLLM, OpenAI API)
